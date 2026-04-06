@@ -21,18 +21,20 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(ASSET_CACHE_DIR, exist_ok=True)
 
 
-def normalize(code: str):
+def norm(code: str):
     return "-".join(p for p in code.split("-") if p != "fe0f")
 
 
 def pair_key(a, b):
-    return "__".join(sorted([normalize(a), normalize(b)]))
+    return "__".join(sorted([norm(a), norm(b)]))
 
 
-async def download_metadata(session):
+async def load_metadata(session):
+    if os.path.exists(METADATA_PATH):
+        with open(METADATA_PATH, "r") as f:
+            return json.load(f)
+
     async with session.get(METADATA_URL) as r:
-        if r.status != 200:
-            raise RuntimeError("Failed to fetch metadata")
         data = await r.text()
 
     with open(METADATA_PATH, "w") as f:
@@ -46,28 +48,26 @@ async def ensure_index(session):
         with open(INDEX_PATH, "r") as f:
             return json.load(f)
 
-    if os.path.exists(METADATA_PATH):
-        with open(METADATA_PATH, "r") as f:
-            metadata = json.load(f)
-    else:
-        metadata = await download_metadata(session)
+    metadata = await load_metadata(session)
+    data = metadata["data"]
 
     index = {}
 
-    for base in metadata:
-        base_code = normalize(base["leftEmoji"])
+    for left_code, combos in data.items():
+        left_code = norm(left_code)
 
-        for combo in base.get("combinations", []):
-            other = normalize(combo["rightEmoji"])
-            date = combo["date"]
+        for right_code, info in combos.items():
+            right_code = norm(right_code)
 
-            # construct URL deterministically
+            date = info["date"]
+
+            # build URL (this is the correct format)
             url = (
                 f"https://www.gstatic.com/android/keyboard/emojikitchen/"
-                f"{date}/{base_code}/{base_code}_{other}.png"
+                f"{date}/{left_code}/{left_code}_{right_code}.png"
             )
 
-            index[pair_key(base_code, other)] = url
+            index[pair_key(left_code, right_code)] = url
 
     with open(INDEX_PATH, "w") as f:
         json.dump(index, f)
