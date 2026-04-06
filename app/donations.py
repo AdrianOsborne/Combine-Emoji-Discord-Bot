@@ -6,7 +6,7 @@ BTC = os.getenv("BITCOIN_ADDRESS")
 BTC_URI = os.getenv("BITCOIN_URI")
 MESSAGE = os.getenv(
     "DONATION_MESSAGE",
-    "Support the project and help fund hosting/dev costs."
+    "Support the project and help fund hosting costs."
 )
 
 class DonateView(discord.ui.View):
@@ -23,7 +23,7 @@ class DonateView(discord.ui.View):
     async def btc(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not BTC:
             await interaction.response.send_message(
-                "Bitcoin donations are not configured yet.",
+                "Bitcoin donations are not configured.",
                 ephemeral=True,
             )
             return

@@ -171,11 +171,24 @@ async def emoji(interaction: discord.Interaction, input: str):
 @tree.command(name="donate", description="Support the emoji bot")
 async def donate(interaction: discord.Interaction):
     usage_stats["donate_requests_total"] += 1
-    await interaction.response.send_message(
-        MESSAGE,
-        view=DonateView(),
-        ephemeral=True,
-    )
+    try:
+        await interaction.response.send_message(
+            MESSAGE,
+            view=DonateView(),
+            ephemeral=True,
+        )
+    except Exception as e:
+        usage_stats["errors_total"] += 1
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"Donate command failed: {e}",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"Donate command failed: {e}",
+                ephemeral=True,
+            )
 
 
 @tree.command(name="stats", description="Show basic bot stats")
