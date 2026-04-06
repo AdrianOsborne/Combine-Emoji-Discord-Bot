@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from collections import defaultdict, deque
 from io import BytesIO
@@ -20,6 +21,8 @@ MAX_EMOJIS = int(os.getenv("MAX_EMOJIS", "6"))
 RATE_LIMIT_USES = int(os.getenv("RATE_LIMIT_USES", "5"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "30"))
 
+CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
+
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(bot)
@@ -33,6 +36,7 @@ usage_stats = {
 
 user_request_times = defaultdict(deque)
 
+
 def invite_url(client_id: str) -> str:
     perms = 2147534848
     return (
@@ -42,8 +46,6 @@ def invite_url(client_id: str) -> str:
         f"&permissions={perms}"
     )
 
-def extract_emojis(text: str):
-    return [c for c in text.strip() if not c.isspace()]
 
 def check_rate_limit(user_id: int):
     now = time.time()
@@ -58,6 +60,40 @@ def check_rate_limit(user_id: int):
 
     bucket.append(now)
     return True, 0
+
+
+def extract_emojis(text: str):
+    found = []
+
+    # First extract custom Discord emojis
+    for match in CUSTOM_EMOJI_RE.finditer(text):
+        found.append((match.start(), match.group(0)))
+
+    # Remove them so they don't interfere with Unicode parsing
+    stripped = CUSTOM_EMOJI_RE.sub(" ", text)
+
+    # Basic Unicode emoji handling:
+    # skip whitespace, variation selectors, and zero-width joiners on their own
+    for idx, ch in enumerate(stripped):
+        cp = ord(ch)
+
+        if ch.isspace():
+            continue
+
+        if cp in (0xFE0F, 0x200D):
+            continue
+
+        # keep broad emoji/symbol ranges
+        if (
+            0x1F000 <= cp <= 0x1FAFF
+            or 0x2600 <= cp <= 0x27BF
+            or 0x2300 <= cp <= 0x23FF
+        ):
+            found.append((100000 + idx, ch))
+
+    found.sort(key=lambda x: x[0])
+    return [value for _, value in found]
+
 
 class ResultView(discord.ui.View):
     def __init__(self, img_bytes: bytes):
@@ -79,8 +115,9 @@ class ResultView(discord.ui.View):
             ephemeral=True,
         )
 
+
 @tree.command(name="emoji", description="Combine multiple emojis into a single image")
-@discord.app_commands.describe(input="Example: 😭💔🔥")
+@discord.app_commands.describe(input="Example: 😭💔 or <:blobcry:123456789012345678><:blobheart:123456789012345678>")
 async def emoji(interaction: discord.Interaction, input: str):
     allowed, retry_after = check_rate_limit(interaction.user.id)
     if not allowed:
@@ -94,7 +131,7 @@ async def emoji(interaction: discord.Interaction, input: str):
 
     if not emojis:
         await interaction.response.send_message(
-            "No emojis found.",
+            "No supported emojis found.",
             ephemeral=True,
         )
         return
@@ -130,6 +167,7 @@ async def emoji(interaction: discord.Interaction, input: str):
             ephemeral=True,
         )
 
+
 @tree.command(name="donate", description="Support the emoji bot")
 async def donate(interaction: discord.Interaction):
     usage_stats["donate_requests_total"] += 1
@@ -138,6 +176,7 @@ async def donate(interaction: discord.Interaction):
         view=DonateView(),
         ephemeral=True,
     )
+
 
 @tree.command(name="stats", description="Show basic bot stats")
 async def stats(interaction: discord.Interaction):
@@ -156,6 +195,7 @@ async def stats(interaction: discord.Interaction):
         ephemeral=True,
     )
 
+
 @bot.event
 async def on_ready():
     await tree.sync()
@@ -165,5 +205,6 @@ async def on_ready():
         print(invite_url(PUBLIC_BOT_INVITE_CLIENT_ID))
     else:
         print("DISCORD_APPLICATION_ID not set, so invite URL could not be printed.")
+
 
 bot.run(TOKEN)
