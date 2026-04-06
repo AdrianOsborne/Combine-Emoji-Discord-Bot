@@ -36,12 +36,6 @@ def check_rate_limit(user_id: int):
     return True
 
 
-# ---------------- LOADING BAR ----------------
-
-def loading_bar():
-    return "▰▰▱▱▱▱  Loading...\n▰▰▰▰▱▱  Processing...\n▰▰▰▰▰▰  Almost done..."
-
-
 # ---------------- SUGGESTIONS ----------------
 
 def build_grouped_suggestions(index, emoji1, emoji2):
@@ -116,18 +110,6 @@ class ResultView(discord.ui.View):
     def __init__(self, image_bytes: bytes):
         super().__init__(timeout=300)
         self.image_bytes = image_bytes
-        self.url = None
-
-    def set_url(self, url: str):
-        self.url = url
-
-    @discord.ui.button(label="Copy Link", style=discord.ButtonStyle.secondary)
-    async def copy_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.url:
-            await interaction.response.send_message(self.url, ephemeral=True)
-        else:
-            file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
-            await interaction.response.send_message(file=file, ephemeral=True)
 
     @discord.ui.button(label="Download", style=discord.ButtonStyle.secondary)
     async def download(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -176,10 +158,6 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 
     await interaction.response.defer(ephemeral=True)
 
-    # loading embed
-    loading = discord.Embed(description=loading_bar())
-    await interaction.edit_original_response(embed=loading)
-
     try:
         data, index, a, b = await generate(e1, e2)
 
@@ -193,20 +171,18 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
+
         embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
 
         view = ResultView(data)
 
-        msg = await interaction.followup.send(
+        await interaction.followup.send(
             embed=embed,
             file=file,
             view=view,
             ephemeral=True
         )
-
-        if msg.attachments:
-            view.set_url(msg.attachments[0].url)
 
     except:
         await interaction.edit_original_response(content="Error")
@@ -229,12 +205,6 @@ async def on_message(message: discord.Message):
     if not is_dm and not is_mention:
         return
 
-    if is_mention:
-        try:
-            await message.delete()
-        except:
-            pass
-
     content = message.content.replace(f"<@{bot.user.id}>", "").strip()
     emojis = extract_two(content)
 
@@ -244,6 +214,31 @@ async def on_message(message: discord.Message):
     try:
         data, index, a, b = await generate(emojis[0], emojis[1])
 
+        if is_mention:
+            try:
+                await message.delete()
+            except:
+                pass
+
+            try:
+                dm = await message.author.create_dm()
+            except:
+                return
+
+            if not data:
+                embeds = build_suggestion_embeds(build_grouped_suggestions(index, a, b))
+                for e in embeds:
+                    await dm.send(embed=e, view=DonateView())
+                return
+
+            file = discord.File(BytesIO(data), filename="emoji.png")
+            embed = discord.Embed()
+            embed.set_image(url="attachment://emoji.png")
+
+            await dm.send(embed=embed, file=file, view=ResultView(data))
+            return
+
+        # DM flow
         if not data:
             embeds = build_suggestion_embeds(build_grouped_suggestions(index, a, b))
             for e in embeds:
@@ -254,16 +249,7 @@ async def on_message(message: discord.Message):
         embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
 
-        view = ResultView(data)
-
-        msg = await message.channel.send(
-            embed=embed,
-            file=file,
-            view=view
-        )
-
-        if msg.attachments:
-            view.set_url(msg.attachments[0].url)
+        await message.channel.send(embed=embed, file=file, view=ResultView(data))
 
     except:
         await message.channel.send("Error")
