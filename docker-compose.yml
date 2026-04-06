@@ -5,5 +5,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - config/donations.env
     volumes:
       - ./app/cache:/app/cache

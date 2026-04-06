@@ -1,4 +1,5 @@
 .env
+config/private/
 __pycache__/
 *.pyc
 app/cache/
