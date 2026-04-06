@@ -53,10 +53,7 @@ def build_help_embed(bot_user: discord.ClientUser):
             "Example: `😭🥶`\n\n"
 
             "Use exactly **2 standard emojis only**.\n"
-            "Custom Discord emojis and text are not supported.\n\n"
-
-            "**Note**\n"
-            "Copy the image to send the emoji.\n\n"
+            "Custom Discord emojis are not supported.\n\n"
 
             "Donations help keep the bot running."
         )
