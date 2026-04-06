@@ -26,6 +26,15 @@ GSTATIC_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+def normalize_code_string(code: str) -> str:
+    parts = [p.lower() for p in code.split("-") if p.lower() != "fe0f"]
+    return "-".join(parts)
+
+def make_pair_key(code_a: str, code_b: str) -> str:
+    a = normalize_code_string(code_a)
+    b = normalize_code_string(code_b)
+    return "__".join(sorted([a, b]))
+
 def _walk_urls(obj, found: set[str]):
     if isinstance(obj, dict):
         for value in obj.values():
@@ -77,13 +86,9 @@ async def ensure_index(session: aiohttp.ClientSession) -> dict[str, str]:
         first = match.group(2).lower()
         second = match.group(3).lower()
 
-        # Store both canonical directions so lookup is instant
-        key1 = "__".join(sorted([first, second]))
-        index[key1] = url
-
-        # Sometimes the directory segment reflects one side too
-        key2 = "__".join(sorted([left_dir, second]))
-        index[key2] = url
+        index[make_pair_key(first, second)] = url
+        index[make_pair_key(left_dir, second)] = url
+        index[make_pair_key(left_dir, first)] = url
 
     with open(INDEX_PATH, "w", encoding="utf-8") as f:
         json.dump(index, f)
@@ -93,7 +98,7 @@ async def ensure_index(session: aiohttp.ClientSession) -> dict[str, str]:
 async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji2: str) -> BytesIO:
     code_a = emoji_to_codepoints(emoji1)
     code_b = emoji_to_codepoints(emoji2)
-    pair_key = "__".join(sorted([code_a, code_b]))
+    pair_key = make_pair_key(code_a, code_b)
 
     cache_name = os.path.join(ASSET_CACHE_DIR, f"{pair_key}.png")
     if os.path.exists(cache_name):
@@ -107,8 +112,7 @@ async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji
 
     if not asset_url:
         raise RuntimeError(
-            "That emoji pair is not available in the current Emoji Kitchen dataset yet. "
-            "Try another pair."
+            "That pair does not seem to exist in the current Emoji Kitchen dataset. Try another pair."
         )
 
     async with session.get(asset_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
