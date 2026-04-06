@@ -11,26 +11,12 @@ from emoji_kitchen import ensure_index, fetch_kitchen_image
 from pair_utils import extract_single_unicode_emoji, canonicalize_pair, emoji_to_codepoints
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID")
-
-RATE_LIMIT_USES = int(os.getenv("RATE_LIMIT_USES", "5"))
-RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "30"))
-
-if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN is not set.")
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(bot)
-
-usage_stats = {
-    "emoji_requests_total": 0,
-    "donate_requests_total": 0,
-    "errors_total": 0,
-    "started_at": int(time.time()),
-}
 
 user_request_times = defaultdict(deque)
 
@@ -41,10 +27,10 @@ def check_rate_limit(user_id: int):
     now = time.time()
     bucket = user_request_times[user_id]
 
-    while bucket and (now - bucket[0]) > RATE_LIMIT_WINDOW_SECONDS:
+    while bucket and (now - bucket[0]) > 30:
         bucket.popleft()
 
-    if len(bucket) >= RATE_LIMIT_USES:
+    if len(bucket) >= 5:
         return False
 
     bucket.append(now)
@@ -53,18 +39,14 @@ def check_rate_limit(user_id: int):
 
 # ---------------- SUGGESTIONS ----------------
 
-def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str) -> discord.Embed:
+def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str):
     code1 = emoji_to_codepoints(emoji1)
     code2 = emoji_to_codepoints(emoji2)
 
     matches = []
 
     for key in index.keys():
-        parts = key.split("__")
-        if len(parts) != 2:
-            continue
-
-        a, b = parts
+        a, b = key.split("__")
 
         if a == code1:
             matches.append((emoji1, b))
@@ -90,56 +72,31 @@ def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str) -> d
         except:
             return code
 
-    lines = []
-    for base, other in unique[:25]:
-        lines.append(f"• {base} + {to_emoji(other)}")
+    lines = [f"{base} + {to_emoji(other)}" for base, other in unique[:20]]
 
-    if not lines:
-        text = "That pairing isn't available."
-    else:
-        text = "That pairing isn't available.\n\nTry:\n" + "\n".join(lines)
+    text = "That pairing isn't available."
+    if lines:
+        text += "\n\n" + "\n".join(lines)
 
-    return discord.Embed(description=text, color=0xED4245)
-
-
-# ---------------- UI ----------------
-
-class ResultView(discord.ui.View):
-    def __init__(self, image_bytes: bytes):
-        super().__init__(timeout=300)
-        self.image_bytes = image_bytes
-
-    @discord.ui.button(label="Post", style=discord.ButtonStyle.primary)
-    async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
-        file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
-        await interaction.response.send_message(file=file)
-
-    @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
-    async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        usage_stats["donate_requests_total"] += 1
-        await interaction.response.send_message(
-            embed=build_donate_embed(),
-            view=DonateView(),
-            ephemeral=True,
-        )
+    return text
 
 
 # ---------------- CORE ----------------
 
-async def generate_image(emoji1: str, emoji2: str):
-    canon_a, canon_b, pair_key = canonicalize_pair(emoji1, emoji2)
+async def generate(emoji1, emoji2):
+    canon_a, canon_b, _ = canonicalize_pair(emoji1, emoji2)
 
     async with aiohttp.ClientSession() as session:
         index = await ensure_index(session)
 
         try:
             result = await fetch_kitchen_image(session, canon_a, canon_b)
-            return result.getvalue(), canon_a, canon_b, pair_key, index
-        except RuntimeError:
-            return None, canon_a, canon_b, pair_key, index
+            return result.getvalue(), index, canon_a, canon_b
+        except:
+            return None, index, canon_a, canon_b
 
 
-# ---------------- SLASH COMMAND ----------------
+# ---------------- SLASH ----------------
 
 @tree.command(name="emoji", description="Combine 2 emojis")
 async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
@@ -155,81 +112,80 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         await interaction.response.send_message("Use exactly 2 emojis", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    # 👇 respond instantly (fixes timeout)
+    await interaction.response.send_message("...", ephemeral=True)
 
     try:
-        data, a, b, key, index = await generate_image(e1, e2)
+        data, index, a, b = await generate(e1, e2)
 
         if not data:
-            await interaction.followup.send(
-                embed=unsupported_pair_embed(index, a, b),
-                ephemeral=True
+            await interaction.edit_original_response(
+                content=unsupported_pair_embed(index, a, b)
             )
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
 
-        usage_stats["emoji_requests_total"] += 1
-
-        await interaction.followup.send(
-            file=file,
-            view=ResultView(data),
-            ephemeral=True
+        await interaction.edit_original_response(
+            content=None,
+            attachments=[file]
         )
 
-    except Exception:
-        usage_stats["errors_total"] += 1
-        await interaction.followup.send("Error", ephemeral=True)
+    except Exception as e:
+        await interaction.edit_original_response(content="Error")
 
 
 # ---------------- DONATE ----------------
 
-@tree.command(name="donate", description="Support")
+@tree.command(name="donate")
 async def donate(interaction: discord.Interaction):
-    usage_stats["donate_requests_total"] += 1
     await interaction.response.send_message(
         embed=build_donate_embed(),
         view=DonateView(),
-        ephemeral=True,
+        ephemeral=True
     )
 
 
-# ---------------- DM HANDLER ----------------
+# ---------------- MESSAGE HANDLER ----------------
+
+def extract_two_emojis(text):
+    emojis = []
+    for char in text:
+        e = extract_single_unicode_emoji(char)
+        if e:
+            emojis.append(e)
+    return emojis
+
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Only DMs
-    if not isinstance(message.channel, discord.DMChannel):
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    is_mention = bot.user in message.mentions
+
+    if not is_dm and not is_mention:
         return
 
-    content = message.content.strip()
+    content = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-    emojis = []
-    for char in content:
-        e = extract_single_unicode_emoji(char)
-        if e:
-            emojis.append(e)
+    emojis = extract_two_emojis(content)
 
     if len(emojis) != 2:
         return
 
     try:
-        data, a, b, key, index = await generate_image(emojis[0], emojis[1])
+        data, index, a, b = await generate(emojis[0], emojis[1])
 
         if not data:
-            await message.reply(
-                embed=unsupported_pair_embed(index, a, b)
-            )
+            await message.reply(unsupported_pair_embed(index, a, b))
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
-
         await message.reply(file=file)
 
-    except Exception:
+    except:
         await message.reply("Error")
 
 
@@ -238,7 +194,7 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_ready():
     await tree.sync()
-    print(f"Bot ready as {bot.user}")
+    print(f"Ready as {bot.user}")
 
 
 bot.run(TOKEN)
