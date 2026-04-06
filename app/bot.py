@@ -1,5 +1,5 @@
+
 import os
-import re
 import time
 from collections import defaultdict, deque
 from io import BytesIO
@@ -7,21 +7,19 @@ from io import BytesIO
 import aiohttp
 import discord
 
-from composer import compose_emojis
-from emoji_fetcher import fetch_emoji_image
-from donations import DonateView, MESSAGE
+from donations import DonateView, build_donate_embed
+from emoji_fetcher import fetch_unicode_emoji_image
+from pair_utils import extract_single_unicode_emoji, canonicalize_pair
+from renderer import render_pair
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-PUBLIC_BOT_INVITE_CLIENT_ID = os.getenv("DISCORD_APPLICATION_ID")
+APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID")
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN is not set.")
-
-MAX_EMOJIS = int(os.getenv("MAX_EMOJIS", "6"))
 RATE_LIMIT_USES = int(os.getenv("RATE_LIMIT_USES", "5"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "30"))
 
-CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
+if not TOKEN:
+    raise RuntimeError("DISCORD_BOT_TOKEN is not set.")
 
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
@@ -36,7 +34,6 @@ usage_stats = {
 
 user_request_times = defaultdict(deque)
 
-
 def invite_url(client_id: str) -> str:
     perms = 2147534848
     return (
@@ -45,7 +42,6 @@ def invite_url(client_id: str) -> str:
         f"&scope=bot%20applications.commands"
         f"&permissions={perms}"
     )
-
 
 def check_rate_limit(user_id: int):
     now = time.time()
@@ -61,186 +57,137 @@ def check_rate_limit(user_id: int):
     bucket.append(now)
     return True, 0
 
+def syntax_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="How to use /emoji",
+        description=(
+            "Use exactly **two standard Unicode emojis**.\n\n"
+            "**Example:** `/emoji emoji1: 😎 emoji2: 📜`\n\n"
+            "This command does not support custom Discord emojis, multiple emojis in one field, or plain text."
+        ),
+        color=0xED4245,
+    )
+    return embed
 
-def extract_emojis(text: str):
-    found = []
-
-    # First extract custom Discord emojis
-    for match in CUSTOM_EMOJI_RE.finditer(text):
-        found.append((match.start(), match.group(0)))
-
-    # Remove them so they don't interfere with Unicode parsing
-    stripped = CUSTOM_EMOJI_RE.sub(" ", text)
-
-    # Basic Unicode emoji handling:
-    # skip whitespace, variation selectors, and zero-width joiners on their own
-    for idx, ch in enumerate(stripped):
-        cp = ord(ch)
-
-        if ch.isspace():
-            continue
-
-        if cp in (0xFE0F, 0x200D):
-            continue
-
-        # keep broad emoji/symbol ranges
-        if (
-            0x1F000 <= cp <= 0x1FAFF
-            or 0x2600 <= cp <= 0x27BF
-            or 0x2300 <= cp <= 0x23FF
-        ):
-            found.append((100000 + idx, ch))
-
-    found.sort(key=lambda x: x[0])
-    return [value for _, value in found]
-
+def result_embed(emoji_a: str, emoji_b: str, pair_key: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="Your emoji fusion is ready",
+        description=f"Pair: {emoji_a} + {emoji_b}",
+        color=0x5865F2,
+    )
+    embed.set_footer(text=f"Stable pair key: {pair_key}")
+    return embed
 
 class ResultView(discord.ui.View):
-    def __init__(self, img_bytes: bytes):
+    def __init__(self, image_bytes: bytes):
         super().__init__(timeout=300)
-        self.img_bytes = img_bytes
+        self.image_bytes = image_bytes
 
     @discord.ui.button(label="Post to channel", style=discord.ButtonStyle.primary)
     async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            file=discord.File(BytesIO(self.img_bytes), filename="emoji.png")
+        file = discord.File(BytesIO(self.image_bytes), filename="emoji-fusion.png")
+        embed = discord.Embed(
+            title="Emoji fusion",
+            description="Shared from a private preview.",
+            color=0x5865F2,
         )
+        embed.set_image(url="attachment://emoji-fusion.png")
+        await interaction.response.send_message(embed=embed, file=file)
 
     @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
     async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
         usage_stats["donate_requests_total"] += 1
         await interaction.response.send_message(
-            MESSAGE,
+            embed=build_donate_embed(),
             view=DonateView(),
             ephemeral=True,
         )
 
-
-@tree.command(name="emoji", description="Combine multiple emojis into a single image")
+@tree.command(name="emoji", description="Fuse exactly two standard emojis into one image")
 @discord.app_commands.describe(
     emoji1="First emoji",
     emoji2="Second emoji",
-    emoji3="Third emoji",
-    emoji4="Fourth emoji",
-    emoji5="Fifth emoji",
-    emoji6="Sixth emoji",
 )
-async def emoji(
-    interaction: discord.Interaction,
-    emoji1: str,
-    emoji2: str | None = None,
-    emoji3: str | None = None,
-    emoji4: str | None = None,
-    emoji5: str | None = None,
-    emoji6: str | None = None,
-):
+async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
     allowed, retry_after = check_rate_limit(interaction.user.id)
     if not allowed:
-        await interaction.response.send_message(
-            f"You're doing that too fast. Try again in about {retry_after} seconds.",
-            ephemeral=True,
+        embed = discord.Embed(
+            title="Slow down a bit",
+            description=f"Try again in about {retry_after} seconds.",
+            color=0xFAA61A,
         )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    raw_inputs = [emoji1, emoji2, emoji3, emoji4, emoji5, emoji6]
+    first = extract_single_unicode_emoji(emoji1)
+    second = extract_single_unicode_emoji(emoji2)
 
-    emojis = []
-    for value in raw_inputs:
-        if not value:
-            continue
-        extracted = extract_emojis(value)
-        if extracted:
-            emojis.extend(extracted)
-
-    if not emojis:
-        await interaction.response.send_message(
-            "No supported emojis found.",
-            ephemeral=True,
-        )
-        return
-
-    if len(emojis) > MAX_EMOJIS:
-        await interaction.response.send_message(
-            f"Please use between 1 and {MAX_EMOJIS} emojis.",
-            ephemeral=True,
-        )
+    if not first or not second:
+        await interaction.response.send_message(embed=syntax_embed(), ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     try:
+        canon_a, canon_b, pair_key = canonicalize_pair(first, second)
         async with aiohttp.ClientSession() as session:
-            images = [await fetch_emoji_image(session, e) for e in emojis]
+            img_a = await fetch_unicode_emoji_image(session, canon_a)
+            img_b = await fetch_unicode_emoji_image(session, canon_b)
 
-        result = compose_emojis(images)
+        result = render_pair(img_a, img_b, pair_key)
         data = result.getvalue()
         usage_stats["emoji_requests_total"] += 1
 
+        file = discord.File(BytesIO(data), filename="emoji-fusion.png")
+        embed = result_embed(canon_a, canon_b, pair_key)
+        embed.set_image(url="attachment://emoji-fusion.png")
+
         await interaction.followup.send(
-            content="Your combined emoji is ready.",
-            file=discord.File(BytesIO(data), filename="emoji.png"),
+            embed=embed,
+            file=file,
             view=ResultView(data),
             ephemeral=True,
         )
-
     except Exception as e:
         usage_stats["errors_total"] += 1
-        await interaction.followup.send(
-            f"Failed to generate image: {e}",
-            ephemeral=True,
+        error_embed = discord.Embed(
+            title="Fusion failed",
+            description=f"{e}",
+            color=0xED4245,
         )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
 
-
-@tree.command(name="donate", description="Support the emoji bot")
+@tree.command(name="donate", description="Support the project")
 async def donate(interaction: discord.Interaction):
     usage_stats["donate_requests_total"] += 1
-    try:
-        await interaction.response.send_message(
-            MESSAGE,
-            view=DonateView(),
-            ephemeral=True,
-        )
-    except Exception as e:
-        usage_stats["errors_total"] += 1
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                f"Donate command failed: {e}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"Donate command failed: {e}",
-                ephemeral=True,
-            )
-
+    await interaction.response.send_message(
+        embed=build_donate_embed(),
+        view=DonateView(),
+        ephemeral=True,
+    )
 
 @tree.command(name="stats", description="Show basic bot stats")
 async def stats(interaction: discord.Interaction):
     uptime_seconds = int(time.time()) - usage_stats["started_at"]
-    invite = "Not configured"
-    if PUBLIC_BOT_INVITE_CLIENT_ID:
-        invite = invite_url(PUBLIC_BOT_INVITE_CLIENT_ID)
+    invite = invite_url(APPLICATION_ID) if APPLICATION_ID else "Not configured"
 
-    await interaction.response.send_message(
-        "Bot stats\n\n"
-        f"Emoji requests: `{usage_stats['emoji_requests_total']}`\n"
-        f"Donate requests: `{usage_stats['donate_requests_total']}`\n"
-        f"Errors: `{usage_stats['errors_total']}`\n"
-        f"Uptime: `{uptime_seconds}` seconds\n\n"
-        f"Invite URL:\n{invite}",
-        ephemeral=True,
+    embed = discord.Embed(
+        title="Bot stats",
+        color=0x57F287,
     )
+    embed.add_field(name="Emoji requests", value=str(usage_stats["emoji_requests_total"]), inline=True)
+    embed.add_field(name="Donate requests", value=str(usage_stats["donate_requests_total"]), inline=True)
+    embed.add_field(name="Errors", value=str(usage_stats["errors_total"]), inline=True)
+    embed.add_field(name="Uptime", value=f"{uptime_seconds} seconds", inline=False)
+    embed.add_field(name="Invite URL", value=invite, inline=False)
 
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.event
 async def on_ready():
     await tree.sync()
     print(f"Bot ready as {bot.user}")
-    if PUBLIC_BOT_INVITE_CLIENT_ID:
-        print("Invite URL:")
-        print(invite_url(PUBLIC_BOT_INVITE_CLIENT_ID))
-    else:
-        print("DISCORD_APPLICATION_ID not set, so invite URL could not be printed.")
-
+    if APPLICATION_ID:
+        print(invite_url(APPLICATION_ID))
 
 bot.run(TOKEN)
