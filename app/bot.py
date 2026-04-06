@@ -8,9 +8,8 @@ import aiohttp
 import discord
 
 from donations import DonateView, build_donate_embed
-from emoji_fetcher import fetch_unicode_emoji_image
+from emoji_kitchen import fetch_kitchen_image
 from pair_utils import extract_single_unicode_emoji, canonicalize_pair
-from renderer import render_pair
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID")
@@ -131,10 +130,8 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
     try:
         canon_a, canon_b, pair_key = canonicalize_pair(first, second)
         async with aiohttp.ClientSession() as session:
-            img_a = await fetch_unicode_emoji_image(session, canon_a)
-            img_b = await fetch_unicode_emoji_image(session, canon_b)
+            result = await fetch_kitchen_image(session, canon_a, canon_b)
 
-        result = render_pair(img_a, img_b, pair_key)
         data = result.getvalue()
         usage_stats["emoji_requests_total"] += 1
 
@@ -151,8 +148,8 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
     except Exception as e:
         usage_stats["errors_total"] += 1
         error_embed = discord.Embed(
-            title="Fusion failed",
-            description=f"{e}",
+            title="Fusion unavailable",
+            description=str(e),
             color=0xED4245,
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
