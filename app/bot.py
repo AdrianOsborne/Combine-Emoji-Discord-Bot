@@ -36,6 +36,52 @@ def check_rate_limit(user_id: int):
     return True
 
 
+# ---------------- HELP ----------------
+
+def build_help_embed(bot_user: discord.ClientUser):
+    embed = discord.Embed(
+        description=(
+            "**How to use**\n\n"
+
+            "**Slash command**\n"
+            "Example: `/emoji emoji1: 😭 emoji2: 🥶`\n\n"
+
+            "**Mention**\n"
+            f"Example: `@{bot_user.name} 😭🥶`\n\n"
+
+            "**Direct Message**\n"
+            "Example: `😭🥶`\n\n"
+
+            "Use exactly **2 standard emojis only**.\n"
+            "Custom Discord emojis and text are not supported.\n\n"
+
+            "**Note**\n"
+            "Copy the image to send the emoji.\n\n"
+
+            "Donations help keep the bot running."
+        )
+    )
+
+    embed.set_footer(
+        text="Tip: Copy the image to share it anywhere"
+    )
+
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
+    async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=build_donate_embed(),
+            view=DonateView(),
+            ephemeral=True
+        )
+
+
 # ---------------- SUGGESTIONS ----------------
 
 def build_grouped_suggestions(index, emoji1, emoji2):
@@ -107,9 +153,8 @@ def build_suggestion_embeds(groups):
 # ---------------- UI ----------------
 
 class ResultView(discord.ui.View):
-    def __init__(self, image_bytes: bytes):
+    def __init__(self):
         super().__init__(timeout=300)
-        self.image_bytes = image_bytes
 
     @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
     async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -166,21 +211,30 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
-
         embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
-
-        view = ResultView(data)
+        embed.set_footer(text="Copy the image to share it")
 
         await interaction.followup.send(
             embed=embed,
             file=file,
-            view=view,
+            view=ResultView(),
             ephemeral=True
         )
 
     except:
         await interaction.edit_original_response(content="Error")
+
+
+# ---------------- HELP SLASH ----------------
+
+@tree.command(name="help", description="How to use the bot")
+async def help_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        embed=build_help_embed(bot.user),
+        view=HelpView(),
+        ephemeral=True
+    )
 
 
 # ---------------- MESSAGE ----------------
@@ -201,6 +255,29 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.replace(f"<@{bot.user.id}>", "").strip()
+    content_lower = content.lower()
+
+    # HELP
+    if content_lower == "help":
+        embed = build_help_embed(bot.user)
+
+        if is_mention:
+            try:
+                await message.delete()
+            except:
+                pass
+
+            try:
+                dm = await message.author.create_dm()
+                await dm.send(embed=embed, view=HelpView())
+            except:
+                pass
+            return
+
+        if is_dm:
+            await message.channel.send(embed=embed, view=HelpView())
+            return
+
     emojis = extract_two(content)
 
     if len(emojis) != 2:
@@ -209,6 +286,7 @@ async def on_message(message: discord.Message):
     try:
         data, index, a, b = await generate(emojis[0], emojis[1])
 
+        # MENTION → DM
         if is_mention:
             try:
                 await message.delete()
@@ -229,11 +307,12 @@ async def on_message(message: discord.Message):
             file = discord.File(BytesIO(data), filename="emoji.png")
             embed = discord.Embed()
             embed.set_image(url="attachment://emoji.png")
+            embed.set_footer(text="Copy the image to share it")
 
-            await dm.send(embed=embed, file=file, view=ResultView(data))
+            await dm.send(embed=embed, file=file, view=ResultView())
             return
 
-        # DM flow
+        # DM FLOW
         if not data:
             embeds = build_suggestion_embeds(build_grouped_suggestions(index, a, b))
             for e in embeds:
@@ -243,8 +322,9 @@ async def on_message(message: discord.Message):
         file = discord.File(BytesIO(data), filename="emoji.png")
         embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
+        embed.set_footer(text="Copy the image to share it")
 
-        await message.channel.send(embed=embed, file=file, view=ResultView(data))
+        await message.channel.send(embed=embed, file=file, view=ResultView())
 
     except:
         await message.channel.send("Error")
