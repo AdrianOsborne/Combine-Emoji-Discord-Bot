@@ -38,32 +38,27 @@ def check_rate_limit(user_id: int):
 
 # ---------------- SUGGESTIONS ----------------
 
-def build_suggestions(index, emoji1, emoji2):
+def build_grouped_suggestions(index, emoji1, emoji2):
     code1 = emoji_to_codepoints(emoji1)
     code2 = emoji_to_codepoints(emoji2)
 
-    results = []
+    groups = {
+        emoji1: [],
+        emoji2: []
+    }
 
     for key in index.keys():
         a, b = key.split("__")
 
         if a == code1:
-            results.append((emoji1, b))
+            groups[emoji1].append(b)
         elif b == code1:
-            results.append((emoji1, a))
+            groups[emoji1].append(a)
 
         if a == code2:
-            results.append((emoji2, b))
+            groups[emoji2].append(b)
         elif b == code2:
-            results.append((emoji2, a))
-
-    seen = set()
-    unique = []
-    for base, other in results:
-        if other in seen:
-            continue
-        seen.add(other)
-        unique.append((base, other))
+            groups[emoji2].append(a)
 
     def to_emoji(code):
         try:
@@ -71,16 +66,39 @@ def build_suggestions(index, emoji1, emoji2):
         except:
             return code
 
-    return [f"{base} + {to_emoji(other)}" for base, other in unique]
+    for k in groups:
+        seen = set()
+        cleaned = []
+        for code in groups[k]:
+            if code in seen:
+                continue
+            seen.add(code)
+            cleaned.append(to_emoji(code))
+        groups[k] = cleaned
+
+    return groups
 
 
-def build_suggestion_embeds(lines):
+def build_suggestion_embeds(groups):
     header = "That pairing isn't available, try one of these supported pairings instead:\n\n"
+
+    def build_section(base, items):
+        if not items:
+            return ""
+        section = f"{base}\n"
+        for i in items:
+            section += f"{base} + {i}\n"
+        return section + "\n"
+
+    full_text = header
+
+    for base, items in groups.items():
+        full_text += build_section(base, items)
 
     chunks = []
     current = ""
 
-    for line in lines:
+    for line in full_text.split("\n"):
         if len(current) + len(line) + 1 > 3500:
             chunks.append(current)
             current = ""
@@ -91,7 +109,7 @@ def build_suggestion_embeds(lines):
 
     embeds = []
     for chunk in chunks[:5]:
-        embeds.append(discord.Embed(description=header + chunk))
+        embeds.append(discord.Embed(description=chunk))
 
     return embeds
 
@@ -102,14 +120,17 @@ class ResultView(discord.ui.View):
     def __init__(self, image_bytes: bytes):
         super().__init__(timeout=300)
         self.image_bytes = image_bytes
+        self.last_url = None
 
-    @discord.ui.button(label="Post", style=discord.ButtonStyle.primary)
-    async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
-        file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
-        embed = discord.Embed(color=0x2b2d31)
-        embed.set_image(url="attachment://emoji.png")
+    def set_url(self, url: str):
+        self.last_url = url
 
-        await interaction.response.send_message(embed=embed, file=file)
+    @discord.ui.button(label="Copy Link", style=discord.ButtonStyle.secondary)
+    async def copy_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.last_url:
+            await interaction.response.send_message(self.last_url, ephemeral=True)
+        else:
+            await interaction.response.send_message("Link not ready yet", ephemeral=True)
 
     @discord.ui.button(label="Download", style=discord.ButtonStyle.secondary)
     async def download(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -140,7 +161,7 @@ async def generate(emoji1, emoji2):
             return None, index, canon_a, canon_b
 
 
-# ---------------- SLASH COMMAND ----------------
+# ---------------- SLASH ----------------
 
 @tree.command(name="emoji", description="Combine 2 emojis")
 async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
@@ -162,8 +183,8 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         data, index, a, b = await generate(e1, e2)
 
         if not data:
-            lines = build_suggestions(index, a, b)
-            embeds = build_suggestion_embeds(lines)
+            groups = build_grouped_suggestions(index, a, b)
+            embeds = build_suggestion_embeds(groups)
 
             await interaction.edit_original_response(
                 content=None,
@@ -177,18 +198,23 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         embed = discord.Embed(color=0x2b2d31)
         embed.set_image(url="attachment://emoji.png")
 
-        await interaction.edit_original_response(
+        view = ResultView(data)
+
+        msg = await interaction.edit_original_response(
             content=None,
             embed=embed,
             attachments=[file],
-            view=ResultView(data)
+            view=view
         )
+
+        if msg.attachments:
+            view.set_url(msg.attachments[0].url)
 
     except:
         await interaction.edit_original_response(content="Error")
 
 
-# ---------------- MESSAGE HANDLER (DM + MENTION) ----------------
+# ---------------- MESSAGE ----------------
 
 def extract_two(text):
     out = []
@@ -221,8 +247,8 @@ async def on_message(message: discord.Message):
         data, index, a, b = await generate(emojis[0], emojis[1])
 
         if not data:
-            lines = build_suggestions(index, a, b)
-            embeds = build_suggestion_embeds(lines)
+            groups = build_grouped_suggestions(index, a, b)
+            embeds = build_suggestion_embeds(groups)
 
             for e in embeds:
                 await message.reply(embed=e, view=DonateView())
@@ -233,11 +259,16 @@ async def on_message(message: discord.Message):
         embed = discord.Embed(color=0x2b2d31)
         embed.set_image(url="attachment://emoji.png")
 
-        await message.reply(
+        view = ResultView(data)
+
+        msg = await message.reply(
             embed=embed,
             file=file,
-            view=ResultView(data)
+            view=view
         )
+
+        if msg.attachments:
+            view.set_url(msg.attachments[0].url)
 
     except:
         await message.reply("Error")
