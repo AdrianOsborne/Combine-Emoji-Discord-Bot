@@ -27,7 +27,6 @@ def build_donate_embed() -> discord.Embed:
             value="Not configured.",
             inline=False,
         )
-    embed.set_footer(text="Discord does not support a direct text copy button. Select and copy the address above.")
     return embed
 
 class DonateView(discord.ui.View):
