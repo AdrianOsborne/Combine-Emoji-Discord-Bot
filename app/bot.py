@@ -20,7 +20,6 @@ tree = discord.app_commands.CommandTree(bot)
 
 user_request_times = defaultdict(deque)
 
-
 # ---------------- RATE LIMIT ----------------
 
 def check_rate_limit(user_id: int):
@@ -58,7 +57,6 @@ def build_suggestions(index, emoji1, emoji2):
         elif b == code2:
             results.append((emoji2, a))
 
-    # dedupe
     seen = set()
     unique = []
     for base, other in results:
@@ -73,15 +71,12 @@ def build_suggestions(index, emoji1, emoji2):
         except:
             return code
 
-    lines = [f"{base} + {to_emoji(other)}" for base, other in unique]
-
-    return lines
+    return [f"{base} + {to_emoji(other)}" for base, other in unique]
 
 
-def suggestion_embed(lines):
-    text = "That pairing isn't available, try one of these supported pairings instead:\n\n"
+def build_suggestion_embeds(lines):
+    header = "That pairing isn't available, try one of these supported pairings instead:\n\n"
 
-    # Discord limit ≈ 4096 chars → chunk safely
     chunks = []
     current = ""
 
@@ -95,8 +90,8 @@ def suggestion_embed(lines):
         chunks.append(current)
 
     embeds = []
-    for chunk in chunks[:5]:  # hard safety cap
-        embeds.append(discord.Embed(description=text + chunk))
+    for chunk in chunks[:5]:
+        embeds.append(discord.Embed(description=header + chunk))
 
     return embeds
 
@@ -111,7 +106,15 @@ class ResultView(discord.ui.View):
     @discord.ui.button(label="Post", style=discord.ButtonStyle.primary)
     async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
         file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
-        await interaction.response.send_message(file=file)
+        embed = discord.Embed(color=0x2b2d31)
+        embed.set_image(url="attachment://emoji.png")
+
+        await interaction.response.send_message(embed=embed, file=file)
+
+    @discord.ui.button(label="Download", style=discord.ButtonStyle.secondary)
+    async def download(self, interaction: discord.Interaction, button: discord.ui.Button):
+        file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
+        await interaction.response.send_message(file=file, ephemeral=True)
 
     @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
     async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -137,7 +140,7 @@ async def generate(emoji1, emoji2):
             return None, index, canon_a, canon_b
 
 
-# ---------------- SLASH ----------------
+# ---------------- SLASH COMMAND ----------------
 
 @tree.command(name="emoji", description="Combine 2 emojis")
 async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
@@ -160,7 +163,7 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 
         if not data:
             lines = build_suggestions(index, a, b)
-            embeds = suggestion_embed(lines)
+            embeds = build_suggestion_embeds(lines)
 
             await interaction.edit_original_response(
                 content=None,
@@ -171,8 +174,12 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 
         file = discord.File(BytesIO(data), filename="emoji.png")
 
+        embed = discord.Embed(color=0x2b2d31)
+        embed.set_image(url="attachment://emoji.png")
+
         await interaction.edit_original_response(
             content=None,
+            embed=embed,
             attachments=[file],
             view=ResultView(data)
         )
@@ -181,7 +188,7 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         await interaction.edit_original_response(content="Error")
 
 
-# ---------------- MESSAGE (DM + MENTION) ----------------
+# ---------------- MESSAGE HANDLER (DM + MENTION) ----------------
 
 def extract_two(text):
     out = []
@@ -215,7 +222,7 @@ async def on_message(message: discord.Message):
 
         if not data:
             lines = build_suggestions(index, a, b)
-            embeds = suggestion_embed(lines)
+            embeds = build_suggestion_embeds(lines)
 
             for e in embeds:
                 await message.reply(embed=e, view=DonateView())
@@ -223,7 +230,11 @@ async def on_message(message: discord.Message):
 
         file = discord.File(BytesIO(data), filename="emoji.png")
 
+        embed = discord.Embed(color=0x2b2d31)
+        embed.set_image(url="attachment://emoji.png")
+
         await message.reply(
+            embed=embed,
             file=file,
             view=ResultView(data)
         )
