@@ -117,8 +117,23 @@ class ResultView(discord.ui.View):
 
 
 @tree.command(name="emoji", description="Combine multiple emojis into a single image")
-@discord.app_commands.describe(input="Example: 😭💔 or <:blobcry:123456789012345678><:blobheart:123456789012345678>")
-async def emoji(interaction: discord.Interaction, input: str):
+@discord.app_commands.describe(
+    emoji1="First emoji",
+    emoji2="Second emoji",
+    emoji3="Third emoji",
+    emoji4="Fourth emoji",
+    emoji5="Fifth emoji",
+    emoji6="Sixth emoji",
+)
+async def emoji(
+    interaction: discord.Interaction,
+    emoji1: str,
+    emoji2: str | None = None,
+    emoji3: str | None = None,
+    emoji4: str | None = None,
+    emoji5: str | None = None,
+    emoji6: str | None = None,
+):
     allowed, retry_after = check_rate_limit(interaction.user.id)
     if not allowed:
         await interaction.response.send_message(
@@ -127,7 +142,15 @@ async def emoji(interaction: discord.Interaction, input: str):
         )
         return
 
-    emojis = extract_emojis(input)
+    raw_inputs = [emoji1, emoji2, emoji3, emoji4, emoji5, emoji6]
+
+    emojis = []
+    for value in raw_inputs:
+        if not value:
+            continue
+        extracted = extract_emojis(value)
+        if extracted:
+            emojis.extend(extracted)
 
     if not emojis:
         await interaction.response.send_message(
