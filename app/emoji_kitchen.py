@@ -21,8 +21,14 @@ ASSET_CACHE_DIR = os.path.join(CACHE_DIR, "assets")
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(ASSET_CACHE_DIR, exist_ok=True)
 
+# Match any Emoji Kitchen style gstatic PNG URL directly from raw text
 GSTATIC_URL_RE = re.compile(
-    r"https://www\.gstatic\.com/android/keyboard/emojikitchen/\d+/([0-9a-f\-]+)/([0-9a-f\-]+)_([0-9a-f\-]+)\.png",
+    r'https:\/\/www\.gstatic\.com\/android\/keyboard\/emojikitchen\/\d+\/[0-9a-f\-]+\/[0-9a-f\-]+_[0-9a-f\-]+\.png',
+    re.IGNORECASE,
+)
+
+PARSE_URL_RE = re.compile(
+    r'https://www\.gstatic\.com/android/keyboard/emojikitchen/\d+/([0-9a-f\-]+)/([0-9a-f\-]+)_([0-9a-f\-]+)\.png',
     re.IGNORECASE,
 )
 
@@ -34,17 +40,6 @@ def make_pair_key(code_a: str, code_b: str) -> str:
     a = normalize_code_string(code_a)
     b = normalize_code_string(code_b)
     return "__".join(sorted([a, b]))
-
-def _walk_urls(obj, found: set[str]):
-    if isinstance(obj, dict):
-        for value in obj.values():
-            _walk_urls(value, found)
-    elif isinstance(obj, list):
-        for item in obj:
-            _walk_urls(item, found)
-    elif isinstance(obj, str):
-        for match in GSTATIC_URL_RE.finditer(obj):
-            found.add(match.group(0))
 
 async def _download_metadata_text(session: aiohttp.ClientSession) -> str:
     async with session.get(METADATA_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
@@ -68,17 +63,14 @@ async def ensure_index(session: aiohttp.ClientSession) -> dict[str, str]:
     else:
         text = await _download_metadata_text(session)
 
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        raise RuntimeError("Emoji Kitchen metadata could not be parsed as JSON.")
+    raw_urls = set(GSTATIC_URL_RE.findall(text))
 
-    urls = set()
-    _walk_urls(parsed, urls)
+    # Unescape JSON slashes
+    urls = {u.replace("\\/", "/") for u in raw_urls}
 
     index = {}
     for url in urls:
-        match = GSTATIC_URL_RE.search(url)
+        match = PARSE_URL_RE.search(url)
         if not match:
             continue
 
@@ -111,9 +103,7 @@ async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji
     asset_url = index.get(pair_key)
 
     if not asset_url:
-        raise RuntimeError(
-            "That pair does not seem to exist in the current Emoji Kitchen dataset. Try another pair."
-        )
+        raise RuntimeError("No Emoji Kitchen match found")
 
     async with session.get(asset_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
         if resp.status != 200:
