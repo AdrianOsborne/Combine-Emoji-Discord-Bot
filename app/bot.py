@@ -36,16 +36,19 @@ def check_rate_limit(user_id: int):
     return True
 
 
+# ---------------- LOADING BAR ----------------
+
+def loading_bar():
+    return "▰▰▱▱▱▱  Loading...\n▰▰▰▰▱▱  Processing...\n▰▰▰▰▰▰  Almost done..."
+
+
 # ---------------- SUGGESTIONS ----------------
 
 def build_grouped_suggestions(index, emoji1, emoji2):
     code1 = emoji_to_codepoints(emoji1)
     code2 = emoji_to_codepoints(emoji2)
 
-    groups = {
-        emoji1: [],
-        emoji2: []
-    }
+    groups = {emoji1: [], emoji2: []}
 
     for key in index.keys():
         a, b = key.split("__")
@@ -82,18 +85,15 @@ def build_grouped_suggestions(index, emoji1, emoji2):
 def build_suggestion_embeds(groups):
     header = "That pairing isn't available, try one of these supported pairings instead:\n\n"
 
-    def build_section(base, items):
-        if not items:
-            return ""
-        section = f"{base}\n"
-        for i in items:
-            section += f"{base} + {i}\n"
-        return section + "\n"
-
     full_text = header
 
     for base, items in groups.items():
-        full_text += build_section(base, items)
+        if not items:
+            continue
+        full_text += f"{base}\n"
+        for i in items:
+            full_text += f"{base} + {i}\n"
+        full_text += "\n"
 
     chunks = []
     current = ""
@@ -107,11 +107,7 @@ def build_suggestion_embeds(groups):
     if current:
         chunks.append(current)
 
-    embeds = []
-    for chunk in chunks[:5]:
-        embeds.append(discord.Embed(description=chunk))
-
-    return embeds
+    return [discord.Embed(description=c) for c in chunks[:5]]
 
 
 # ---------------- UI ----------------
@@ -120,17 +116,18 @@ class ResultView(discord.ui.View):
     def __init__(self, image_bytes: bytes):
         super().__init__(timeout=300)
         self.image_bytes = image_bytes
-        self.last_url = None
+        self.url = None
 
     def set_url(self, url: str):
-        self.last_url = url
+        self.url = url
 
     @discord.ui.button(label="Copy Link", style=discord.ButtonStyle.secondary)
     async def copy_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.last_url:
-            await interaction.response.send_message(self.last_url, ephemeral=True)
+        if self.url:
+            await interaction.response.send_message(self.url, ephemeral=True)
         else:
-            await interaction.response.send_message("Link not ready yet", ephemeral=True)
+            file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
+            await interaction.response.send_message(file=file, ephemeral=True)
 
     @discord.ui.button(label="Download", style=discord.ButtonStyle.secondary)
     async def download(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -142,7 +139,7 @@ class ResultView(discord.ui.View):
         await interaction.response.send_message(
             embed=build_donate_embed(),
             view=DonateView(),
-            ephemeral=True,
+            ephemeral=True
         )
 
 
@@ -177,15 +174,17 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         await interaction.response.send_message("Use exactly 2 emojis", ephemeral=True)
         return
 
-    await interaction.response.send_message("...", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    # loading embed
+    loading = discord.Embed(description=loading_bar())
+    await interaction.edit_original_response(embed=loading)
 
     try:
         data, index, a, b = await generate(e1, e2)
 
         if not data:
-            groups = build_grouped_suggestions(index, a, b)
-            embeds = build_suggestion_embeds(groups)
-
+            embeds = build_suggestion_embeds(build_grouped_suggestions(index, a, b))
             await interaction.edit_original_response(
                 content=None,
                 embeds=embeds,
@@ -194,17 +193,16 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
-
-        embed = discord.Embed(color=0x2b2d31)
+        embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
 
         view = ResultView(data)
 
-        msg = await interaction.edit_original_response(
-            content=None,
+        msg = await interaction.followup.send(
             embed=embed,
-            attachments=[file],
-            view=view
+            file=file,
+            view=view,
+            ephemeral=True
         )
 
         if msg.attachments:
@@ -217,12 +215,7 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 # ---------------- MESSAGE ----------------
 
 def extract_two(text):
-    out = []
-    for c in text:
-        e = extract_single_unicode_emoji(c)
-        if e:
-            out.append(e)
-    return out
+    return [c for c in text if extract_single_unicode_emoji(c)]
 
 
 @bot.event
@@ -236,8 +229,13 @@ async def on_message(message: discord.Message):
     if not is_dm and not is_mention:
         return
 
-    content = message.content.replace(f"<@{bot.user.id}>", "").strip()
+    if is_mention:
+        try:
+            await message.delete()
+        except:
+            pass
 
+    content = message.content.replace(f"<@{bot.user.id}>", "").strip()
     emojis = extract_two(content)
 
     if len(emojis) != 2:
@@ -247,21 +245,18 @@ async def on_message(message: discord.Message):
         data, index, a, b = await generate(emojis[0], emojis[1])
 
         if not data:
-            groups = build_grouped_suggestions(index, a, b)
-            embeds = build_suggestion_embeds(groups)
-
+            embeds = build_suggestion_embeds(build_grouped_suggestions(index, a, b))
             for e in embeds:
-                await message.reply(embed=e, view=DonateView())
+                await message.channel.send(embed=e, view=DonateView())
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
-
-        embed = discord.Embed(color=0x2b2d31)
+        embed = discord.Embed()
         embed.set_image(url="attachment://emoji.png")
 
         view = ResultView(data)
 
-        msg = await message.reply(
+        msg = await message.channel.send(
             embed=embed,
             file=file,
             view=view
@@ -271,7 +266,7 @@ async def on_message(message: discord.Message):
             view.set_url(msg.attachments[0].url)
 
     except:
-        await message.reply("Error")
+        await message.channel.send("Error")
 
 
 # ---------------- READY ----------------
