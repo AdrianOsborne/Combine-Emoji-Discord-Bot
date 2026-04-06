@@ -148,8 +148,7 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
     except Exception as e:
         usage_stats["errors_total"] += 1
         error_embed = discord.Embed(
-            title="Fusion unavailable",
-            description=str(e),
+            title="No Emoji Kitchen match found",
             color=0xED4245,
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)

@@ -1,4 +1,4 @@
-
+import json
 import os
 import re
 from io import BytesIO
@@ -13,22 +13,32 @@ METADATA_URL = os.getenv(
     "https://raw.githubusercontent.com/xsalazar/emoji-kitchen-backend/main/app/metadata.json",
 )
 
-METADATA_TEXT_PATH = "cache/metadata.json"
-ASSET_CACHE_DIR = "cache/assets"
+CACHE_DIR = "cache"
+METADATA_TEXT_PATH = os.path.join(CACHE_DIR, "metadata.json")
+INDEX_PATH = os.path.join(CACHE_DIR, "metadata_index.json")
+ASSET_CACHE_DIR = os.path.join(CACHE_DIR, "assets")
 
-os.makedirs("cache", exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(ASSET_CACHE_DIR, exist_ok=True)
 
 GSTATIC_URL_RE = re.compile(
-    r"https://www\.gstatic\.com/android/keyboard/emojikitchen/\d+/[0-9a-f\-]+/[0-9a-f\-]+_[0-9a-f\-]+\.png"
+    r"https://www\.gstatic\.com/android/keyboard/emojikitchen/\d+/([0-9a-f\-]+)/([0-9a-f\-]+)_([0-9a-f\-]+)\.png",
+    re.IGNORECASE,
 )
 
-async def ensure_metadata_text(session: aiohttp.ClientSession) -> str:
-    if os.path.exists(METADATA_TEXT_PATH):
-        with open(METADATA_TEXT_PATH, "r", encoding="utf-8") as f:
-            return f.read()
+def _walk_urls(obj, found: set[str]):
+    if isinstance(obj, dict):
+        for value in obj.values():
+            _walk_urls(value, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_urls(item, found)
+    elif isinstance(obj, str):
+        for match in GSTATIC_URL_RE.finditer(obj):
+            found.add(match.group(0))
 
-    async with session.get(METADATA_URL) as resp:
+async def _download_metadata_text(session: aiohttp.ClientSession) -> str:
+    async with session.get(METADATA_URL, timeout=aiohttp.ClientTimeout(total=20)) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Failed to download Emoji Kitchen metadata: HTTP {resp.status}")
         text = await resp.text()
@@ -38,60 +48,62 @@ async def ensure_metadata_text(session: aiohttp.ClientSession) -> str:
 
     return text
 
-def _candidate_urls_from_text(metadata_text: str, code_a: str, code_b: str) -> list[str]:
-    found = set()
+async def ensure_index(session: aiohttp.ClientSession) -> dict[str, str]:
+    if os.path.exists(INDEX_PATH):
+        with open(INDEX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-    # First, scan all explicit gstatic URLs already present in metadata text.
-    for url in GSTATIC_URL_RE.findall(metadata_text):
-        normalized = url.lower()
-        if f"/{code_a}/" in normalized and f"_{code_b}.png" in normalized:
-            found.add(normalized)
-        if f"/{code_b}/" in normalized and f"_{code_a}.png" in normalized:
-            found.add(normalized)
+    if os.path.exists(METADATA_TEXT_PATH):
+        with open(METADATA_TEXT_PATH, "r", encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = await _download_metadata_text(session)
 
-    # Then, build plausible direct URLs if the metadata mentions a matching date bucket.
-    date_codes = set(re.findall(r"emojikitchen/(\d+)", metadata_text))
-    for date_code in date_codes:
-        found.add(
-            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_a}/{code_a}_{code_b}.png"
-        )
-        found.add(
-            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_b}/{code_a}_{code_b}.png"
-        )
-        found.add(
-            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_a}/{code_b}_{code_a}.png"
-        )
-        found.add(
-            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_b}/{code_b}_{code_a}.png"
-        )
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise RuntimeError("Emoji Kitchen metadata could not be parsed as JSON.")
 
-    return sorted(found)
+    urls = set()
+    _walk_urls(parsed, urls)
 
-async def _first_live_url(session: aiohttp.ClientSession, urls: list[str]) -> str | None:
+    index = {}
     for url in urls:
-        try:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return url
-        except Exception:
+        match = GSTATIC_URL_RE.search(url)
+        if not match:
             continue
-    return None
+
+        left_dir = match.group(1).lower()
+        first = match.group(2).lower()
+        second = match.group(3).lower()
+
+        # Store both canonical directions so lookup is instant
+        key1 = "__".join(sorted([first, second]))
+        index[key1] = url
+
+        # Sometimes the directory segment reflects one side too
+        key2 = "__".join(sorted([left_dir, second]))
+        index[key2] = url
+
+    with open(INDEX_PATH, "w", encoding="utf-8") as f:
+        json.dump(index, f)
+
+    return index
 
 async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji2: str) -> BytesIO:
-    metadata_text = await ensure_metadata_text(session)
-
     code_a = emoji_to_codepoints(emoji1)
     code_b = emoji_to_codepoints(emoji2)
+    pair_key = "__".join(sorted([code_a, code_b]))
 
-    cache_name = os.path.join(ASSET_CACHE_DIR, f"{code_a}__{code_b}.png")
+    cache_name = os.path.join(ASSET_CACHE_DIR, f"{pair_key}.png")
     if os.path.exists(cache_name):
         with open(cache_name, "rb") as f:
             out = BytesIO(f.read())
             out.seek(0)
             return out
 
-    candidates = _candidate_urls_from_text(metadata_text, code_a, code_b)
-    asset_url = await _first_live_url(session, candidates)
+    index = await ensure_index(session)
+    asset_url = index.get(pair_key)
 
     if not asset_url:
         raise RuntimeError(
@@ -99,7 +111,7 @@ async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji
             "Try another pair."
         )
 
-    async with session.get(asset_url) as resp:
+    async with session.get(asset_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Failed to download mashup image: HTTP {resp.status}")
         data = await resp.read()
