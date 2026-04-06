@@ -16,9 +16,6 @@ class DonateView(discord.ui.View):
         if PAYPAL:
             self.add_item(discord.ui.Button(label="Donate with PayPal", url=PAYPAL))
 
-        if BTC_URI:
-            self.add_item(discord.ui.Button(label="Open Bitcoin Wallet", url=BTC_URI))
-
     @discord.ui.button(label="Show Bitcoin Address", style=discord.ButtonStyle.secondary)
     async def btc(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not BTC:
@@ -28,7 +25,11 @@ class DonateView(discord.ui.View):
             )
             return
 
+        extra = ""
+        if BTC_URI:
+            extra = f"\n\nBitcoin URI:\n`{BTC_URI}`"
+
         await interaction.response.send_message(
-            f"{MESSAGE}\n\nBitcoin address:\n`{BTC}`",
+            f"{MESSAGE}\n\nBitcoin address:\n`{BTC}`{extra}",
             ephemeral=True,
         )
