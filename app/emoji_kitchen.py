@@ -1,6 +1,6 @@
 
-import json
 import os
+import re
 from io import BytesIO
 
 import aiohttp
@@ -13,107 +13,91 @@ METADATA_URL = os.getenv(
     "https://raw.githubusercontent.com/xsalazar/emoji-kitchen-backend/main/app/metadata.json",
 )
 
-METADATA_PATH = "cache/metadata.json"
+METADATA_TEXT_PATH = "cache/metadata.json"
 ASSET_CACHE_DIR = "cache/assets"
 
 os.makedirs("cache", exist_ok=True)
 os.makedirs(ASSET_CACHE_DIR, exist_ok=True)
 
-async def ensure_metadata(session: aiohttp.ClientSession) -> dict:
-    if os.path.exists(METADATA_PATH):
-        with open(METADATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+GSTATIC_URL_RE = re.compile(
+    r"https://www\.gstatic\.com/android/keyboard/emojikitchen/\d+/[0-9a-f\-]+/[0-9a-f\-]+_[0-9a-f\-]+\.png"
+)
+
+async def ensure_metadata_text(session: aiohttp.ClientSession) -> str:
+    if os.path.exists(METADATA_TEXT_PATH):
+        with open(METADATA_TEXT_PATH, "r", encoding="utf-8") as f:
+            return f.read()
 
     async with session.get(METADATA_URL) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Failed to download Emoji Kitchen metadata: HTTP {resp.status}")
         text = await resp.text()
 
-    with open(METADATA_PATH, "w", encoding="utf-8") as f:
+    with open(METADATA_TEXT_PATH, "w", encoding="utf-8") as f:
         f.write(text)
 
-    return json.loads(text)
+    return text
 
-def _candidate_keys(e1: str, e2: str) -> list[str]:
-    c1 = emoji_to_codepoints(e1)
-    c2 = emoji_to_codepoints(e2)
-    return [
-        f"{c1}_{c2}",
-        f"{c2}_{c1}",
-        f"{c1}__{c2}",
-        f"{c2}__{c1}",
-        f"{c1}-{c2}",
-        f"{c2}-{c1}",
-        f"{c1}+{c2}",
-        f"{c2}+{c1}",
-    ]
+def _candidate_urls_from_text(metadata_text: str, code_a: str, code_b: str) -> list[str]:
+    found = set()
 
-def _find_asset_url(metadata: dict, e1: str, e2: str) -> str | None:
-    candidates = _candidate_keys(e1, e2)
+    # First, scan all explicit gstatic URLs already present in metadata text.
+    for url in GSTATIC_URL_RE.findall(metadata_text):
+        normalized = url.lower()
+        if f"/{code_a}/" in normalized and f"_{code_b}.png" in normalized:
+            found.add(normalized)
+        if f"/{code_b}/" in normalized and f"_{code_a}.png" in normalized:
+            found.add(normalized)
 
-    if isinstance(metadata, dict):
-        for key in candidates:
-            value = metadata.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
-            if isinstance(value, dict):
-                for field in ("url", "gStaticUrl", "imageUrl", "asset_url", "assetUrl", "src"):
-                    maybe = value.get(field)
-                    if isinstance(maybe, str) and maybe.startswith("http"):
-                        return maybe
+    # Then, build plausible direct URLs if the metadata mentions a matching date bucket.
+    date_codes = set(re.findall(r"emojikitchen/(\d+)", metadata_text))
+    for date_code in date_codes:
+        found.add(
+            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_a}/{code_a}_{code_b}.png"
+        )
+        found.add(
+            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_b}/{code_a}_{code_b}.png"
+        )
+        found.add(
+            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_a}/{code_b}_{code_a}.png"
+        )
+        found.add(
+            f"https://www.gstatic.com/android/keyboard/emojikitchen/{date_code}/{code_b}/{code_b}_{code_a}.png"
+        )
 
-        combos = metadata.get("combinations") or metadata.get("pairs") or metadata.get("data")
-        if isinstance(combos, dict):
-            for key in candidates:
-                value = combos.get(key)
-                if isinstance(value, str) and value.startswith("http"):
-                    return value
-                if isinstance(value, dict):
-                    for field in ("url", "gStaticUrl", "imageUrl", "asset_url", "assetUrl", "src"):
-                        maybe = value.get(field)
-                        if isinstance(maybe, str) and maybe.startswith("http"):
-                            return maybe
+    return sorted(found)
 
-        if isinstance(combos, list):
-            code_a = emoji_to_codepoints(e1)
-            code_b = emoji_to_codepoints(e2)
-            target = {code_a, code_b}
-            for item in combos:
-                if not isinstance(item, dict):
-                    continue
-
-                item_codes = set()
-                for field in ("leftEmojiCodepoint", "rightEmojiCodepoint", "emoji1", "emoji2", "left", "right"):
-                    value = item.get(field)
-                    if isinstance(value, str):
-                        item_codes.add(value.replace("_", "-"))
-
-                if target.issubset(item_codes) or target == item_codes:
-                    for field in ("url", "gStaticUrl", "imageUrl", "asset_url", "assetUrl", "src"):
-                        maybe = item.get(field)
-                        if isinstance(maybe, str) and maybe.startswith("http"):
-                            return maybe
+async def _first_live_url(session: aiohttp.ClientSession, urls: list[str]) -> str | None:
+    for url in urls:
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return url
+        except Exception:
+            continue
     return None
 
 async def fetch_kitchen_image(session: aiohttp.ClientSession, emoji1: str, emoji2: str) -> BytesIO:
-    metadata = await ensure_metadata(session)
-    asset_url = _find_asset_url(metadata, emoji1, emoji2)
-    if not asset_url:
-        raise RuntimeError(
-            "That emoji pair is not available in the current Emoji Kitchen dataset yet. "
-            "Try another pair."
-        )
+    metadata_text = await ensure_metadata_text(session)
 
-    cache_name = os.path.join(
-        ASSET_CACHE_DIR,
-        f"{emoji_to_codepoints(emoji1)}__{emoji_to_codepoints(emoji2)}.png"
-    )
+    code_a = emoji_to_codepoints(emoji1)
+    code_b = emoji_to_codepoints(emoji2)
 
+    cache_name = os.path.join(ASSET_CACHE_DIR, f"{code_a}__{code_b}.png")
     if os.path.exists(cache_name):
         with open(cache_name, "rb") as f:
             out = BytesIO(f.read())
             out.seek(0)
             return out
+
+    candidates = _candidate_urls_from_text(metadata_text, code_a, code_b)
+    asset_url = await _first_live_url(session, candidates)
+
+    if not asset_url:
+        raise RuntimeError(
+            "That emoji pair is not available in the current Emoji Kitchen dataset yet. "
+            "Try another pair."
+        )
 
     async with session.get(asset_url) as resp:
         if resp.status != 200:
