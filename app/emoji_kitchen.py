@@ -55,28 +55,28 @@ async def ensure_index(session: aiohttp.ClientSession) -> dict[str, str]:
 
     index: dict[str, str] = {}
 
+    index = {}
+
     for left_code, left_entry in data.items():
-        combinations = left_entry.get("combinations", {})
+        left_code = normalize(left_code)
 
-        for right_code, combo_list in combinations.items():
-            if not combo_list:
-                continue
+    combos = left_entry.get("combinations") if isinstance(left_entry, dict) else None
+    if not combos:
+        continue
 
-            # Prefer the newest/latest entry if present
-            chosen = None
-            for item in combo_list:
-                if item.get("isLatest") is True:
-                    chosen = item
-                    break
-            if chosen is None:
-                chosen = combo_list[0]
+    for right_code, combo_list in combos.items():
+        right_code = normalize(right_code)s
 
-            url = chosen.get("gStaticUrl")
-            left_cp = chosen.get("leftEmojiCodepoint", left_code)
-            right_cp = chosen.get("rightEmojiCodepoint", right_code)
+        if not isinstance(combo_list, list):
+            continue
 
+        for item in combo_list:
+            url = item.get("gStaticUrl")
             if not url:
                 continue
+
+            left_cp = normalize(item.get("leftEmojiCodepoint", left_code))
+            right_cp = normalize(item.get("rightEmojiCodepoint", right_code))
 
             index[pair_key(left_cp, right_cp)] = url
 
