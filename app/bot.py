@@ -39,28 +39,29 @@ def check_rate_limit(user_id: int):
 
 # ---------------- SUGGESTIONS ----------------
 
-def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str):
+def build_suggestions(index, emoji1, emoji2):
     code1 = emoji_to_codepoints(emoji1)
     code2 = emoji_to_codepoints(emoji2)
 
-    matches = []
+    results = []
 
     for key in index.keys():
         a, b = key.split("__")
 
         if a == code1:
-            matches.append((emoji1, b))
+            results.append((emoji1, b))
         elif b == code1:
-            matches.append((emoji1, a))
+            results.append((emoji1, a))
 
         if a == code2:
-            matches.append((emoji2, b))
+            results.append((emoji2, b))
         elif b == code2:
-            matches.append((emoji2, a))
+            results.append((emoji2, a))
 
+    # dedupe
     seen = set()
     unique = []
-    for base, other in matches:
+    for base, other in results:
         if other in seen:
             continue
         seen.add(other)
@@ -72,13 +73,53 @@ def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str):
         except:
             return code
 
-    lines = [f"{base} + {to_emoji(other)}" for base, other in unique[:20]]
+    lines = [f"{base} + {to_emoji(other)}" for base, other in unique]
 
-    text = "That pairing isn't available."
-    if lines:
-        text += "\n\n" + "\n".join(lines)
+    return lines
 
-    return text
+
+def suggestion_embed(lines):
+    text = "That pairing isn't available, try one of these supported pairings instead:\n\n"
+
+    # Discord limit ≈ 4096 chars → chunk safely
+    chunks = []
+    current = ""
+
+    for line in lines:
+        if len(current) + len(line) + 1 > 3500:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+
+    if current:
+        chunks.append(current)
+
+    embeds = []
+    for chunk in chunks[:5]:  # hard safety cap
+        embeds.append(discord.Embed(description=text + chunk))
+
+    return embeds
+
+
+# ---------------- UI ----------------
+
+class ResultView(discord.ui.View):
+    def __init__(self, image_bytes: bytes):
+        super().__init__(timeout=300)
+        self.image_bytes = image_bytes
+
+    @discord.ui.button(label="Post", style=discord.ButtonStyle.primary)
+    async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
+        await interaction.response.send_message(file=file)
+
+    @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
+    async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=build_donate_embed(),
+            view=DonateView(),
+            ephemeral=True,
+        )
 
 
 # ---------------- CORE ----------------
@@ -112,15 +153,19 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
         await interaction.response.send_message("Use exactly 2 emojis", ephemeral=True)
         return
 
-    # 👇 respond instantly (fixes timeout)
     await interaction.response.send_message("...", ephemeral=True)
 
     try:
         data, index, a, b = await generate(e1, e2)
 
         if not data:
+            lines = build_suggestions(index, a, b)
+            embeds = suggestion_embed(lines)
+
             await interaction.edit_original_response(
-                content=unsupported_pair_embed(index, a, b)
+                content=None,
+                embeds=embeds,
+                view=DonateView()
             )
             return
 
@@ -128,33 +173,23 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 
         await interaction.edit_original_response(
             content=None,
-            attachments=[file]
+            attachments=[file],
+            view=ResultView(data)
         )
 
-    except Exception as e:
+    except:
         await interaction.edit_original_response(content="Error")
 
 
-# ---------------- DONATE ----------------
+# ---------------- MESSAGE (DM + MENTION) ----------------
 
-@tree.command(name="donate")
-async def donate(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        embed=build_donate_embed(),
-        view=DonateView(),
-        ephemeral=True
-    )
-
-
-# ---------------- MESSAGE HANDLER ----------------
-
-def extract_two_emojis(text):
-    emojis = []
-    for char in text:
-        e = extract_single_unicode_emoji(char)
+def extract_two(text):
+    out = []
+    for c in text:
+        e = extract_single_unicode_emoji(c)
         if e:
-            emojis.append(e)
-    return emojis
+            out.append(e)
+    return out
 
 
 @bot.event
@@ -170,7 +205,7 @@ async def on_message(message: discord.Message):
 
     content = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-    emojis = extract_two_emojis(content)
+    emojis = extract_two(content)
 
     if len(emojis) != 2:
         return
@@ -179,11 +214,19 @@ async def on_message(message: discord.Message):
         data, index, a, b = await generate(emojis[0], emojis[1])
 
         if not data:
-            await message.reply(unsupported_pair_embed(index, a, b))
+            lines = build_suggestions(index, a, b)
+            embeds = suggestion_embed(lines)
+
+            for e in embeds:
+                await message.reply(embed=e, view=DonateView())
             return
 
         file = discord.File(BytesIO(data), filename="emoji.png")
-        await message.reply(file=file)
+
+        await message.reply(
+            file=file,
+            view=ResultView(data)
+        )
 
     except:
         await message.reply("Error")
