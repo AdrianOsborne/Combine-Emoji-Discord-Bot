@@ -1,4 +1,3 @@
-
 import os
 import time
 from collections import defaultdict, deque
@@ -8,8 +7,8 @@ import aiohttp
 import discord
 
 from donations import DonateView, build_donate_embed
-from emoji_kitchen import fetch_kitchen_image
-from pair_utils import extract_single_unicode_emoji, canonicalize_pair
+from emoji_kitchen import ensure_index, fetch_kitchen_image
+from pair_utils import extract_single_unicode_emoji, canonicalize_pair, emoji_to_codepoints
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID")
@@ -33,6 +32,7 @@ usage_stats = {
 
 user_request_times = defaultdict(deque)
 
+
 def invite_url(client_id: str) -> str:
     perms = 2147534848
     return (
@@ -41,6 +41,7 @@ def invite_url(client_id: str) -> str:
         f"&scope=bot%20applications.commands"
         f"&permissions={perms}"
     )
+
 
 def check_rate_limit(user_id: int):
     now = time.time()
@@ -56,17 +57,22 @@ def check_rate_limit(user_id: int):
     bucket.append(now)
     return True, 0
 
+
 def syntax_embed() -> discord.Embed:
     embed = discord.Embed(
         title="How to use /emoji",
         description=(
             "Use exactly **two standard Unicode emojis**.\n\n"
-            "**Example:** `/emoji emoji1: 😎 emoji2: 📜`\n\n"
-            "This command does not support custom Discord emojis, multiple emojis in one field, or plain text."
+            "**Example:** `/emoji emoji1: 😂 emoji2: 😡`\n\n"
+            "This command does not support:\n"
+            "• custom Discord emojis\n"
+            "• multiple emojis in one field\n"
+            "• plain text"
         ),
         color=0xED4245,
     )
     return embed
+
 
 def result_embed(emoji_a: str, emoji_b: str, pair_key: str) -> discord.Embed:
     embed = discord.Embed(
@@ -76,6 +82,68 @@ def result_embed(emoji_a: str, emoji_b: str, pair_key: str) -> discord.Embed:
     )
     embed.set_footer(text=f"Stable pair key: {pair_key}")
     return embed
+
+
+def _code_to_display_emoji(code: str) -> str:
+    try:
+        parts = [int(part, 16) for part in code.split("-") if part]
+        return "".join(chr(part) for part in parts)
+    except Exception:
+        return code
+
+
+def unsupported_pair_embed(index: dict[str, str], emoji1: str, emoji2: str) -> discord.Embed:
+    code1 = emoji_to_codepoints(emoji1)
+    code2 = emoji_to_codepoints(emoji2)
+
+    suggestions = []
+
+    for key in index.keys():
+        parts = key.split("__")
+        if len(parts) != 2:
+            continue
+
+        a, b = parts
+
+        if a == code1:
+            suggestions.append((emoji1, b))
+        elif b == code1:
+            suggestions.append((emoji1, a))
+
+        if a == code2:
+            suggestions.append((emoji2, b))
+        elif b == code2:
+            suggestions.append((emoji2, a))
+
+    seen = set()
+    cleaned = []
+    for base_emoji, other_code in suggestions:
+        if other_code in seen:
+            continue
+        seen.add(other_code)
+        cleaned.append((base_emoji, other_code))
+        if len(cleaned) >= 6:
+            break
+
+    lines = []
+    for base_emoji, other_code in cleaned:
+        other_emoji = _code_to_display_emoji(other_code)
+        lines.append(f"• {base_emoji} + {other_emoji}")
+
+    description = "Those are valid emojis, but that specific Emoji Kitchen pair was not found."
+
+    if lines:
+        description += "\n\nTry one of these supported pairings instead:\n" + "\n".join(lines)
+    else:
+        description += "\n\nTry a more common pair like:\n• 😂 + 😡\n• 😭 + 🥶\n• 😍 + ❤️"
+
+    embed = discord.Embed(
+        title="No Emoji Kitchen match found",
+        description=description,
+        color=0xED4245,
+    )
+    return embed
+
 
 class ResultView(discord.ui.View):
     def __init__(self, image_bytes: bytes):
@@ -101,6 +169,7 @@ class ResultView(discord.ui.View):
             view=DonateView(),
             ephemeral=True,
         )
+
 
 @tree.command(name="emoji", description="Fuse exactly two standard emojis into one image")
 @discord.app_commands.describe(
@@ -129,8 +198,20 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
 
     try:
         canon_a, canon_b, pair_key = canonicalize_pair(first, second)
+
         async with aiohttp.ClientSession() as session:
-            result = await fetch_kitchen_image(session, canon_a, canon_b)
+            index = await ensure_index(session)
+
+            try:
+                result = await fetch_kitchen_image(session, canon_a, canon_b)
+            except RuntimeError as e:
+                if str(e) == "No Emoji Kitchen match found":
+                    await interaction.followup.send(
+                        embed=unsupported_pair_embed(index, canon_a, canon_b),
+                        ephemeral=True,
+                    )
+                    return
+                raise
 
         data = result.getvalue()
         usage_stats["emoji_requests_total"] += 1
@@ -145,13 +226,16 @@ async def emoji(interaction: discord.Interaction, emoji1: str, emoji2: str):
             view=ResultView(data),
             ephemeral=True,
         )
+
     except Exception as e:
         usage_stats["errors_total"] += 1
         error_embed = discord.Embed(
-            title="No Emoji Kitchen match found",
+            title="Fusion failed",
+            description=str(e),
             color=0xED4245,
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
+
 
 @tree.command(name="donate", description="Support the project")
 async def donate(interaction: discord.Interaction):
@@ -161,6 +245,7 @@ async def donate(interaction: discord.Interaction):
         view=DonateView(),
         ephemeral=True,
     )
+
 
 @tree.command(name="stats", description="Show basic bot stats")
 async def stats(interaction: discord.Interaction):
@@ -179,11 +264,13 @@ async def stats(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 @bot.event
 async def on_ready():
     await tree.sync()
     print(f"Bot ready as {bot.user}")
     if APPLICATION_ID:
         print(invite_url(APPLICATION_ID))
+
 
 bot.run(TOKEN)
