@@ -111,11 +111,6 @@ class ResultView(discord.ui.View):
         super().__init__(timeout=300)
         self.image_bytes = image_bytes
 
-    @discord.ui.button(label="Download", style=discord.ButtonStyle.secondary)
-    async def download(self, interaction: discord.Interaction, button: discord.ui.Button):
-        file = discord.File(BytesIO(self.image_bytes), filename="emoji.png")
-        await interaction.response.send_message(file=file, ephemeral=True)
-
     @discord.ui.button(label="Donate", style=discord.ButtonStyle.secondary)
     async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
