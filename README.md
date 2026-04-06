@@ -4,7 +4,7 @@ A Discord bot that combines multiple emojis into a single PNG using Twemoji.
 
 ## Setup
 
-1. Clone '.env' with:
+1. Clone `.env` with:
 ```
 cp .env.example .env
 ```
