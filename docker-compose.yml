@@ -1,0 +1,9 @@
+services:
+  emoji-bot:
+    build: .
+    container_name: emoji-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./app/cache:/app/cache
