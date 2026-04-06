@@ -2,6 +2,8 @@
 
 A lightweight Discord bot that combines 2 emojis into a single image using Google Emoji Kitchen–style assets.
 
+<img width="1000" height="1000" alt="Response from Discord Bot when running command" src="https://github.com/user-attachments/assets/ac348b94-1b09-4b00-9771-0c1c5498a793" />
+
 ## Setup
 
 ### Create Discord Application
